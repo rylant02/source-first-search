@@ -22,12 +22,12 @@ func NewQueryExpander() *QueryExpander {
 		OllamaURL: "http://localhost:11434/api/generate",
 		ModelName: "llama3.2:1b",
 		Client: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: 30 * time.Second,
 		},
 	}
 }
 
-// FanOut takes a messy conversational query and extracts 3 to 5 optimized sub-queries
+// extracts 3 to 5 optimized subqueries
 func (qe *QueryExpander) FanOut(userQuery string) ([]string, error) {
 	prompt := fmt.Sprintf(`You are the first stage of an advanced AI search engine. 
 Take this conversational query, strip out filler words, and extract 3 to 5 unique, highly specific, technical keyword search queries targeting the raw source files.

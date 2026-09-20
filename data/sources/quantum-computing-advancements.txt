@@ -1,0 +1,1 @@
+The transition to post-quantum cryptographic primitives relies heavily on module lattice-based key encapsulation mechanisms like ML-KEM (Kyber). Unlike RSA factor de-factorization via Shor's algorithm, lattice problems remain structurally computationally hard for quantum architectures, provided token vector dimensions maintain adequate noise parameters.

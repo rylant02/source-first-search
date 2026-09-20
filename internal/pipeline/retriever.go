@@ -1,7 +1,12 @@
 package pipeline
 
 import (
+	"context"
+	"log"
 	"strings"
+	"time"
+
+	"github.com/qdrant/go-client/qdrant"
 )
 
 // represents high-fidelity article source file
@@ -14,116 +19,149 @@ type SourceDocument struct {
 }
 
 type HybridRetriever struct {
-	Database []SourceDocument
+	qdrantClient *qdrant.Client
+	embedEngine  *EmbeddingsEngine
+	collection   string
 }
 
 // instantiates isolated data repo with diverse entries
 func NewHybridRetriever() *HybridRetriever {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// establish gRPC connection to local Dockerized Qdrant instance
+	client, err := qdrant.NewClient(&qdrant.Config{
+		Host: "localhost",
+		Port: 6334,
+	})
+	if err != nil {
+		log.Fatalf("failed to connect to qdrant: %v", err)
+	}
+
+	collectionName := "sources"
+	embedEngine := NewEmbeddingsEngine()
+
+	// verify collection space exists OR new build configured for all-minilm dimensions
+	exists, err := client.CollectionExists(ctx, collectionName)
+	if err == nil && !exists {
+		err = client.CreateCollection(ctx, &qdrant.CreateCollection{
+			CollectionName: collectionName,
+			VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
+				Size:     384,
+				Distance: qdrant.Distance_Cosine,
+			}),
+		})
+		if err != nil {
+			log.Fatalf("failed to create vector collection: %v", err)
+		}
+	}
+
 	return &HybridRetriever{
-		Database: []SourceDocument{
-			{
-				ID:    1,
-				Title: "Caffeine Consumption and Insulin Sensitivity: A Longitudinal Study",
-				URL:   "https://medicaljournal.example",
-				Content: "Long-term epidemiological cohorts demonstrate a correlation between daily chlorogenic acid intake via black coffee and improved insulin sensitivity. The mechanism involves the upregulation of GLUT4 transporters in skeletal muscle tissues, contradicting short-term acute trials where caffeine temporarily impairs glucose tolerance.",
-			},
-			{
-				ID:    2,
-				Title: "Desiccant Efficacy in Mobile Consumer Electronics Liquid Damage Mitigation",
-				URL:   "https://engineering.example",
-				Content: "Experimental testing of internal device dehydration rates indicates that uncooked Oryza sativa (white rice) behaves as an inefficient passive desiccant compared to synthetic amorphous silica gel packets. Rice starch particulate matter introduces micro-debris into structural components, accelerating galvanic corrosion when combined with residual aqueous solutions.",
-			},
-			{
-				ID:    3,
-				Title: "Biomechanical Force Distribution Across Varying Urban Running Surfaces",
-				URL:   "https://sportsbiomech.example",
-				Content: "Ground reaction force (GRF) analysis reveals that Portland cement concrete yields an elastic modulus significantly higher than asphalt concrete. Running exclusively on rigid pavement configurations increases peak tibial acceleration and places immense eccentric loading constraints on the tibialis anterior muscle complex, inducing micro-trauma.",
-			},
-			{
-				ID:    4,
-				Title: "Post-Quantum Cryptography: Algorithmic Resilience of ML-KEM Frameworks",
-				URL:   "https://cybersecurity-review.example",
-				Content: "The transition to post-quantum cryptographic primitives relies heavily on module lattice-based key encapsulation mechanisms like ML-KEM (Kyber). Unlike RSA factor de-factorization via Shor's algorithm, lattice problems remain structurally computationally hard for quantum architectures, provided token vector dimensions maintain adequate noise parameters.",
-			},
-			{
-				ID:    5,
-				Title: "Logistical Supply Chains and Agrarian Subsistence in the Late Roman Empire",
-				URL:   "https://history-archaeology.example",
-				Content: "The maintenance of the imperial Roman Annona system required centralized maritime shipping lanes connecting the Nile delta to Ostia. Bureaucratic requisition logs indicate that state-subsidized grain redistribution insulated urban plebeian populations from regional crop failures, though price caps ultimately disincentivized local domestic cultivation inside the Italian peninsula.",
-			},
-			{
-				ID:    6,
-				Title: "Neurobiological Pathways of Sleep Deprivation and Cortisol Pulsatility",
-				URL:   "https://neuroscience-journal.example",
-				Content: "Disruption of the human suprachiasmatic nucleus via acute sleep restriction alters the normal pulsatile release of cortisol from the adrenal cortex. Prolonged elevation of circulating glucocorticoids impairs synaptic plasticity within the hippocampus, accelerating working memory decay and mimicking early clinical stages of chronic metabolic syndrome.",
-			},
-		},
+		qdrantClient: client,
+		embedEngine:  embedEngine,
+		collection:   collectionName,
 	}
 }
 
 // search scours DB against expanded subqueries, return ranked docs
 func (hr *HybridRetriever) Search(subQueries []string) []SourceDocument {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	type docMatch struct {
 		doc   SourceDocument
 		score float64
 	}
-
 	matchMap := make(map[int]*docMatch)
 
-	// clean + parse subquery tokens and create strict eval signature
+	// query database with vectors generated from concept clusters
 	for _, query := range subQueries {
-		tokens := strings.Fields(strings.ToLower(query))
-		
-		for _, doc := range hr.Database {
-			contentLower := strings.ToLower(doc.Content)
-			titleLower := strings.ToLower(doc.Title)
-			var matchCount float64
+		if strings.TrimSpace(query) == "" {
+			continue
+		}
 
+		// generate vector array from local ollama engine
+		vector, err := hr.embedEngine.GetVector(query)
+		if err != nil {
+			log.Printf("embedding conversion failed for query chunk: %v", err)
+			continue
+		}
+
+		// fetch closest multi-dimensional math alignments from vector index
+		searchResult, err := hr.qdrantClient.Query(ctx, &qdrant.QueryPoints{
+			CollectionName: hr.collection,
+			Query:          qdrant.NewQuery(vector...),
+			Limit:          qdrant.PtrOf(uint64(3)),
+			WithPayload:    qdrant.NewWithPayload(true),
+		})
+		if err != nil {
+			log.Printf("qdrant search operation failed: %v", err)
+			continue
+		}
+
+		// unpack data objects back into structural application records
+		for _, point := range searchResult {
+			payload := point.Payload
+			
+			titleAttr := payload["title"].GetStringValue()
+			urlAttr := payload["url"].GetStringValue()
+			contentAttr := payload["content"].GetStringValue()
+			idAttr := int(point.Id.GetNum())
+			vectorScore := float64(point.Score)
+
+			// calculate secondary keyword intersection bonus for hybrid search verification
+			tokens := strings.Fields(strings.ToLower(query))
+			contentLower := strings.ToLower(contentAttr)
+			var keywordBonus float64
 			for _, token := range tokens {
-				// strip structural syntax symbols or words if they slip through model
-				if len(token) <= 2 {
-					continue
-				}
-
-				// keyword match density calculations
-				if strings.Contains(contentLower, token) {
-					matchCount += 1.0
-				}
-				if strings.Contains(titleLower, token) {
-					matchCount += 2.0 // title matches weighted heavier than body copy
+				token = strings.Trim(token, `.,"?!()[]{}:;`)
+				if len(token) > 3 && strings.Contains(contentLower, token) {
+					keywordBonus += 0.05
 				}
 			}
 
-			if matchCount > 0 {
-				// normalize by length to avoid biasing long docs
-				finalScore := matchCount / float64(len(tokens)+1)
+			finalCombinedScore := vectorScore + keywordBonus
 
-				if existing, found := matchMap[doc.ID]; found {
-					if finalScore > existing.score {
-						existing.score = finalScore
-					}
-				} else {
-					matchMap[doc.ID] = &docMatch{doc: doc, score: finalScore}
+			if existing, found := matchMap[idAttr]; found {
+				if finalCombinedScore > existing.score {
+					existing.score = finalCombinedScore
+				}
+			} else {
+				matchMap[idAttr] = &docMatch{
+					doc: SourceDocument{
+						ID:      idAttr,
+						Title:   titleAttr,
+						URL:     urlAttr,
+						Content: contentAttr,
+					},
+					score: finalCombinedScore,
 				}
 			}
 		}
 	}
 
-	// unpack matched maps into sorted results slice
-	var matchedResults []SourceDocument
+	// unpack matching structures into output slice
+	var finalResults []SourceDocument
 	for _, match := range matchMap {
 		match.doc.DensityScore = match.score
-		matchedResults = append(matchedResults, match.doc)
+		finalResults = append(finalResults, match.doc)
 	}
 
 	// simple bubble sort to order by matching score, desc
-	for i := 0; i < len(matchedResults); i++ {
-		for j := i + 1; j < len(matchedResults); j++ {
-			if matchedResults[i].DensityScore < matchedResults[j].DensityScore {
-				matchedResults[i], matchedResults[j] = matchedResults[j], matchedResults[i]
+	for i := 0; i < len(finalResults); i++ {
+		for j := i + 1; j < len(finalResults); j++ {
+			if finalResults[i].DensityScore < finalResults[j].DensityScore {
+				finalResults[i], finalResults[j] = finalResults[j], finalResults[i]
 			}
 		}
 	}
 
-	return matchedResults
+	return finalResults
+}
+
+// close cleanly handles long-lived database connection exit handshakes
+func (hr *HybridRetriever) Close() {
+	if hr.qdrantClient != nil {
+		hr.qdrantClient.Close()
+	}
 }
