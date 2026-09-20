@@ -15,3 +15,20 @@ My goal with this project is to utilize machine learning under the hood to accom
 3. Cross-encoder reranking: evaluates source depth/density.\
 ↓
 4. Raw source presentation: displays untouched docs with UX streaming interval pipeline to keep user engaged.\
+
+## Local prod testing + verification
+
+1. Boot background vector DB container:
+   ```bash
+   docker compose up -d
+   ```
+2. Ingest raw text data files into the vector space:
+   ```bash
+   go run cmd/ingest/main.go
+   ```
+3. Start web server binary:
+   ```bash
+   go run cmd/server/main.go
+   ```
+4. Load `http://localhost:8080` in browser + execute this sample conversational query:
+   > **"Will quantum computers break encryption or are there algorithms that can stop them?"**
